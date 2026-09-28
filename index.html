@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ruin Wars</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="title-block">
+        <h1>Ruin Wars</h1>
+        <p class="tagline">Quests among the fallen kingdoms</p>
+      </div>
+      <div class="header-actions">
+        <button type="button" id="btn-rename" class="btn btn-ghost" title="Rename your knight">Rename</button>
+        <button type="button" id="btn-reset" class="btn btn-ghost danger" title="Wipe save">Reset</button>
+      </div>
+    </header>
+
+    <section class="stats panel" aria-label="Player stats">
+      <div class="stat-name">
+        <span class="label">Knight</span>
+        <strong id="player-name">Knight</strong>
+      </div>
+      <div class="stat">
+        <span class="label">Level</span>
+        <strong id="stat-level">1</strong>
+      </div>
+      <div class="stat">
+        <span class="label">XP</span>
+        <strong><span id="stat-xp">0</span> / <span id="stat-xp-next">100</span></strong>
+        <div class="bar" aria-hidden="true"><div id="xp-bar" class="bar-fill xp"></div></div>
+      </div>
+      <div class="stat">
+        <span class="label">Gold</span>
+        <strong id="stat-gold">0</strong>
+      </div>
+      <div class="stat">
+        <span class="label">Energy</span>
+        <strong><span id="stat-energy">20</span> / <span id="stat-energy-max">20</span></strong>
+        <div class="bar" aria-hidden="true"><div id="energy-bar" class="bar-fill energy"></div></div>
+        <span class="regen-hint" id="regen-hint">+1 / 5s</span>
+      </div>
+      <div class="stat">
+        <span class="label">Stamina</span>
+        <strong><span id="stat-stamina">20</span> / <span id="stat-stamina-max">20</span></strong>
+        <div class="bar" aria-hidden="true"><div id="stamina-bar" class="bar-fill stamina"></div></div>
+        <span class="regen-hint" id="stamina-regen-hint">+1 / 8s</span>
+      </div>
+      <div class="stat">
+        <span class="label">Health</span>
+        <strong><span id="stat-health">100</span> / <span id="stat-health-max">100</span></strong>
+        <div class="bar" aria-hidden="true"><div id="health-bar" class="bar-fill health"></div></div>
+        <span class="regen-hint" id="health-regen-hint">+1 / 15s</span>
+      </div>
+    </section>
+
+    <main class="main">
+      <section class="panel" aria-labelledby="quests-heading">
+        <h2 id="quests-heading">Quests</h2>
+        <p class="panel-intro">
+          Spend Energy on jobs. Earn gold and XP. Mastery ranks unlock at 5 / 15 / 40 completions.
+        </p>
+        <div id="quest-list" class="card-list"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="lists-heading">
+        <h2 id="lists-heading">The Lists</h2>
+        <p class="panel-intro">
+          Spend Stamina to face rivals on the Field of Honor. Wounds cost Health — Rest at the Chapel when fallen.
+        </p>
+        <div id="fight-list" class="card-list"></div>
+        <h3 class="subhead" id="heal-heading">Chapel Rest</h3>
+        <p class="panel-intro">Spend gold to mend wounds. Fights are locked while Health is 0.</p>
+        <div id="heal-list" class="card-list"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="holdings-heading">
+        <h2 id="holdings-heading">Holdings</h2>
+        <p class="panel-intro">
+          Buy lands and towers. They gather gold over real time — Collect before the coffers overflow (2 cycles).
+        </p>
+        <div id="holdings-list" class="card-list"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="inventory-heading">
+        <h2 id="inventory-heading">Inventory</h2>
+        <p class="panel-intro">
+          Loot from quests. Equip one weapon and one armor; relics grant passive bonuses while kept.
+        </p>
+        <div id="equip-summary" class="equip-summary"></div>
+        <div id="inventory-list" class="card-list"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="shop-heading">
+        <h2 id="shop-heading">Armory &amp; Relics</h2>
+        <p class="panel-intro">Buy once. Bonuses stack into every quest thereafter.</p>
+        <div id="shop-list" class="card-list"></div>
+      </section>
+
+      <section class="panel log-panel" aria-labelledby="log-heading">
+        <h2 id="log-heading">Chronicle</h2>
+        <ul id="log" class="log" aria-live="polite"></ul>
+        <h3 class="subhead" id="legends-heading">Legends</h3>
+        <p class="panel-intro">Story beats unlocked by quest mastery. Re-read them here.</p>
+        <div id="legends-list" class="legends-list"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>Ruin Wars v0.3 — local save in this browser</span>
+    </footer>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
