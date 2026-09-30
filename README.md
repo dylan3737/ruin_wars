@@ -98,8 +98,9 @@ In `game.js`:
 - **`REGIONS` / `QUESTS` / `FOES` / `BOSSES` / `NAMED_KNIGHTS` / `HEALS` / `UPGRADES` / `HOLDINGS` / `LOOT` / `COLLECTIONS` / `STORY_BEATS` / `BOSS_LEGENDS`** — content tables
 - **`doQuest` / `doFight` / `doBossStrike` / `hireRecruit` / `rallyRecruit` / `recruitNamed` / `redeemCollection` / `setRegion` / `doHeal` / `buyUpgrade` / `buyHolding` / `collectHolding` / `equipItem`** — core actions
 - **Fight formula** — `playerPower = attackRating() ±6` vs `foe.power ±8`; losses/chip damage soaked by `defenseRating()`
-- **`tick`** — energy, stamina, health regen + holding accrual + boss regen/respawn every second
-- **`save` / `load`** — `localStorage` key `ruin_wars_save_v4` (`saveVersion: 4`); falls back to legacy `ruin_wars_save_v1` and migrates
+- **`tick`** — energy, stamina, health regen + holding accrual + boss regen/respawn every second, then `renderLive()`
+- **Rendering** — render functions build detached nodes and `patchChildren()` morphs them into the page (keyed by `data-key`), so unchanged buttons keep their identity across ticks (no dropped clicks / hover flicker). Buttons use `data-action` / `data-id` with one delegated click listener (`ACTIONS`).
+- **`save` / `load`** — `localStorage` key `ruin_wars_save_v4` (`saveVersion: 4`); falls back to legacy `ruin_wars_save_v1` and migrates. Saves happen immediately after actions, at most every ~8s from the tick when something changed, and on `visibilitychange` (hidden) / `pagehide` / `beforeunload`. The last 50 chronicle lines are saved under `log` (optional; older saves load fine without it).
 - **`window.RuinWars`** — DevTools helpers
 
 ## Save compatibility

@@ -18,7 +18,8 @@
   const BASE_REGEN_MS = 12000;
   const STAMINA_REGEN_MS = 18000;
   const HEALTH_REGEN_MS = 20000;
-  const LOG_MAX = 50;
+  const LOG_MAX = 50; // chronicle lines kept in memory and persisted in the save
+  const SAVE_INTERVAL_MS = 8000; // tick-driven saves are throttled to this when state is dirty
   const BLADE_ATTACK_BONUS = 12;
   const LOOT_DROP_CHANCE = 0.22;
   const MASTERY_THRESHOLDS = [5, 15, 40];
@@ -1386,8 +1387,12 @@
         ...state,
         saveVersion: SAVE_VERSION,
         lastTick: Date.now(),
+        log: logLines.slice(0, LOG_MAX),
       };
       localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
+      saveDirty = false;
+      lastSaveAt = Date.now();
+      lastSaveSig = saveSignature();
     } catch (e) {
       // ignore quota / private mode
     }
@@ -1408,6 +1413,15 @@
       const data = JSON.parse(raw);
       if (!data || typeof data !== "object") return;
       state = { ...defaultState(), ...data };
+      // Chronicle log lives outside state; older saves simply have no log field.
+      delete state.log;
+      if (Array.isArray(data.log)) {
+        logLines = data.log
+          .filter(function (line) {
+            return typeof line === "string";
+          })
+          .slice(0, LOG_MAX);
+      }
       if (!state.questCooldownUntil || typeof state.questCooldownUntil !== "object") {
         state.questCooldownUntil = {};
       }
@@ -2208,7 +2222,9 @@
 
   // --- Tick ---
 
-  let lastTickSig = "";
+  let saveDirty = false;
+  let lastSaveAt = 0;
+  let lastSaveSig = "";
 
   function tick() {
     const now = Date.now();
@@ -2259,46 +2275,32 @@
     accrueAllHoldings(dt);
     accrueAllBosses(dt);
 
-    save();
-    renderStatsOnly();
-
-    var anyQuestCd = false;
-    if (state.questCooldownUntil) {
-      for (var qid in state.questCooldownUntil) {
-        if (questCooldownRemaining(qid) > 0) {
-          anyQuestCd = true;
-          break;
-        }
-      }
+    const sig = saveSignature();
+    if (sig !== lastSaveSig) {
+      lastSaveSig = sig;
+      saveDirty = true;
     }
-    // Also refresh once when a cooldown ends or Energy/Stamina tick changes affordability
-    const sig =
-      state.energy + "|" + state.stamina + "|" + (state.fallen ? 1 : 0) + "|" + (rallyRemaining() > 0 ? 1 : 0);
-    const sigChanged = sig !== lastTickSig;
-    lastTickSig = sig;
-    if (anyQuestCd || sigChanged) {
-      renderQuests();
+    if (saveDirty && now - lastSaveAt >= SAVE_INTERVAL_MS) {
+      save();
     }
 
-    var anyFightCd = false;
-    if (state.fightCooldownUntil) {
-      for (var fid in state.fightCooldownUntil) {
-        if (fightCooldownRemaining(fid) > 0) {
-          anyFightCd = true;
-          break;
-        }
-      }
-    }
-    if (anyFightCd || state.fallen || sigChanged) {
-      renderFights();
-    }
+    // Renders patch the DOM in place, so refreshing every panel each second is cheap
+    // and leaves unchanged nodes (and their hover / pressed state) untouched.
+    renderLive();
+  }
 
-    // Refresh holdings pending display periodically
-    renderHoldings();
-    renderBosses();
-    if (rallyRemaining() > 0 || sigChanged) {
-      renderBand();
-    }
+  /** Values worth persisting between throttled saves (regen accumulators are not). */
+  function saveSignature() {
+    const parts = [state.energy, state.stamina, state.health, state.fallen ? 1 : 0, state.gold];
+    HOLDINGS.forEach(function (def) {
+      const h = state.holdings && state.holdings[def.id];
+      parts.push(h ? Math.floor(h.pending || 0) : 0);
+    });
+    BOSSES.forEach(function (def) {
+      const b = state.bosses && state.bosses[def.id];
+      parts.push(b ? b.hp + ":" + b.respawnAt : "");
+    });
+    return parts.join("|");
   }
 
   // --- DOM ---
@@ -2343,6 +2345,114 @@
     btnRename: document.getElementById("btn-rename"),
     btnReset: document.getElementById("btn-reset"),
   };
+
+  // --- In-place DOM patching ---
+  // Render functions build fresh, detached nodes; patchChildren() morphs them into the
+  // live container. Nodes that match (same tag + data-key) are kept and only their
+  // changed attributes / text are written, so buttons keep their identity across ticks:
+  // clicks are never dropped and :hover does not flicker. Structure changes (region
+  // switch, new holding, new loot) insert / move / remove only the affected nodes.
+
+  function nodeKey(node) {
+    return node.nodeType === 1 ? node.getAttribute("data-key") : null;
+  }
+
+  function sameKind(a, b) {
+    return a.nodeType === b.nodeType && a.nodeName === b.nodeName && nodeKey(a) === nodeKey(b);
+  }
+
+  function patchAttributes(from, to) {
+    for (let i = from.attributes.length - 1; i >= 0; i--) {
+      const name = from.attributes[i].name;
+      if (!to.hasAttribute(name)) from.removeAttribute(name);
+    }
+    for (let i = 0; i < to.attributes.length; i++) {
+      const a = to.attributes[i];
+      if (from.getAttribute(a.name) !== a.value) from.setAttribute(a.name, a.value);
+    }
+  }
+
+  function patchNode(from, to) {
+    if (from.nodeType !== 1) {
+      if (from.nodeValue !== to.nodeValue) from.nodeValue = to.nodeValue;
+      return;
+    }
+    patchAttributes(from, to);
+    patchChildren(from, to);
+  }
+
+  /** Make parent's children match source's children, reusing existing nodes where possible. */
+  function patchChildren(parent, source) {
+    const next = Array.prototype.slice.call(source.childNodes);
+    const keyed = {};
+    Array.prototype.forEach.call(parent.childNodes, function (n) {
+      const k = nodeKey(n);
+      if (k) keyed[k] = n;
+    });
+    for (let i = 0; i < next.length; i++) {
+      const want = next[i];
+      const k = nodeKey(want);
+      let cur = parent.childNodes[i] || null;
+      const found = k ? keyed[k] : null;
+      if (found) {
+        delete keyed[k];
+        if (found !== cur) {
+          parent.insertBefore(found, cur);
+          cur = found;
+        }
+      }
+      if (cur && sameKind(cur, want)) {
+        patchNode(cur, want);
+      } else if (cur) {
+        parent.insertBefore(want, cur);
+      } else {
+        parent.appendChild(want);
+      }
+    }
+    while (parent.childNodes.length > next.length) {
+      parent.removeChild(parent.lastChild);
+    }
+  }
+
+  /** innerHTML replacement that only touches what changed. */
+  function patchHtml(target, html) {
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    patchChildren(target, tmp);
+  }
+
+  /** Buttons carry data-action / data-id; one delegated listener dispatches them. */
+  function actionButton(btn, action, id) {
+    btn.setAttribute("data-action", action);
+    if (id !== undefined && id !== null) btn.setAttribute("data-id", id);
+    return btn;
+  }
+
+  const ACTIONS = {
+    region: setRegion,
+    quest: doQuest,
+    fight: doFight,
+    boss: doBossStrike,
+    hire: hireRecruit,
+    rally: rallyRecruit,
+    named: recruitNamed,
+    redeem: redeemCollection,
+    heal: doHeal,
+    "buy-holding": buyHolding,
+    "collect-holding": collectHolding,
+    "upgrade-holding": upgradeHolding,
+    equip: equipItem,
+    unequip: unequipSlot,
+    upgrade: buyUpgrade,
+  };
+
+  function onActionClick(ev) {
+    const target = ev.target && ev.target.closest ? ev.target.closest("[data-action]") : null;
+    if (!target || target.disabled) return;
+    const fn = ACTIONS[target.getAttribute("data-action")];
+    if (!fn) return;
+    fn(target.getAttribute("data-id"));
+  }
 
   function renderStatsOnly() {
     el.name.textContent = state.name;
@@ -2389,7 +2499,7 @@
 
   function renderRegions() {
     if (!el.regionTabs) return;
-    el.regionTabs.innerHTML = "";
+    const frag = document.createDocumentFragment();
     const cur = currentRegion();
     REGIONS.forEach(function (r) {
       const unlocked = regionUnlocked(r);
@@ -2397,18 +2507,18 @@
       btn.type = "button";
       btn.className = "btn region-tab" + (r.id === cur.id ? " active" : "");
       btn.setAttribute("data-region", r.id);
+      btn.setAttribute("data-key", "region:" + r.id);
       btn.textContent = unlocked ? r.name : r.name + " (Lv " + r.minLevel + ")";
       btn.disabled = !unlocked;
-      btn.addEventListener("click", function () {
-        setRegion(r.id);
-      });
-      el.regionTabs.appendChild(btn);
+      actionButton(btn, "region", r.id);
+      frag.appendChild(btn);
     });
+    patchChildren(el.regionTabs, frag);
     if (el.regionIntro) el.regionIntro.textContent = cur.desc;
   }
 
   function renderQuests() {
-    el.questList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     const regionId = currentRegion().id;
     QUESTS.forEach(function (q) {
       if ((q.region || "camelot") !== regionId) return;
@@ -2424,6 +2534,7 @@
       const card = document.createElement("article");
       card.className =
         "card" + (locked ? " locked" : "") + (onCooldown ? " cooling" : "");
+      card.setAttribute("data-key", "quest:" + q.id);
       card.innerHTML =
         '<div class="card-body">' +
         "<h3>" +
@@ -2475,16 +2586,15 @@
         btn.textContent = "Embark";
       }
       btn.disabled = locked || !canAfford || onCooldown;
-      btn.addEventListener("click", function () {
-        doQuest(q.id);
-      });
+      actionButton(btn, "quest", q.id);
       card.appendChild(btn);
-      el.questList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.questList, frag);
   }
 
   function renderFights() {
-    el.fightList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     const isFallen = state.fallen || state.health <= 0;
     FOES.forEach(function (f) {
       const locked = state.level < f.minLevel;
@@ -2497,6 +2607,7 @@
         (locked ? " locked" : "") +
         (onCooldown ? " cooling" : "") +
         (isFallen ? " fallen" : "");
+      card.setAttribute("data-key", "foe:" + f.id);
       card.innerHTML =
         '<div class="card-body">' +
         "<h3>" +
@@ -2542,17 +2653,16 @@
         btn.textContent = "Challenge";
       }
       btn.disabled = locked || !canAfford || onCooldown || isFallen;
-      btn.addEventListener("click", function () {
-        doFight(f.id);
-      });
+      actionButton(btn, "fight", f.id);
       card.appendChild(btn);
-      el.fightList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.fightList, frag);
   }
 
   function renderBosses() {
     if (!el.bossList) return;
-    el.bossList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     const isFallen = state.fallen || state.health <= 0;
     BOSSES.forEach(function (def) {
       const b = bossState(def);
@@ -2567,6 +2677,7 @@
       card.className =
         "card boss-card" + (locked ? " locked" : "") + (respawn > 0 ? " cooling" : "");
       card.setAttribute("data-boss", def.id);
+      card.setAttribute("data-key", "boss:" + def.id);
       card.innerHTML =
         '<div class="card-body">' +
         "<h3>" +
@@ -2627,12 +2738,11 @@
         btn.textContent = "Strike";
       }
       btn.disabled = locked || respawn > 0 || isFallen || !canAfford;
-      btn.addEventListener("click", function () {
-        doBossStrike(def.id);
-      });
+      actionButton(btn, "boss", def.id);
       card.appendChild(btn);
-      el.bossList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.bossList, frag);
   }
 
   function renderBand() {
@@ -2640,30 +2750,33 @@
     const band = bandState();
     const cap = bandCap();
     const bb = bandBonuses();
-    el.bandSummary.innerHTML =
+    patchHtml(
+      el.bandSummary,
       "<strong>Band:</strong> " +
-      bandSize() +
-      " (" +
-      band.recruits +
-      "/" +
-      cap +
-      " sworn knights, " +
-      namedKnightsOwned().length +
-      "/" +
-      NAMED_KNIGHTS.length +
-      " named) · <strong>+" +
-      bb.attack +
-      "</strong> atk · <strong>+" +
-      bb.defense +
-      "</strong> def" +
-      (bb.xpMult ? " · +" + Math.round(bb.xpMult * 100) + "% XP" : "");
+        bandSize() +
+        " (" +
+        band.recruits +
+        "/" +
+        cap +
+        " sworn knights, " +
+        namedKnightsOwned().length +
+        "/" +
+        NAMED_KNIGHTS.length +
+        " named) · <strong>+" +
+        bb.attack +
+        "</strong> atk · <strong>+" +
+        bb.defense +
+        "</strong> def" +
+        (bb.xpMult ? " · +" + Math.round(bb.xpMult * 100) + "% XP" : "")
+    );
 
-    el.bandList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     const atCap = band.recruits >= cap;
 
     // Hire (gold)
     const hire = document.createElement("article");
     hire.className = "card";
+    hire.setAttribute("data-key", "band:hire");
     hire.innerHTML =
       '<div class="card-body"><h3>Hire a Sworn Knight</h3>' +
       '<p class="card-meta">Each sworn knight adds +' +
@@ -2684,14 +2797,15 @@
     hireBtn.id = "btn-hire";
     hireBtn.textContent = atCap ? "At cap" : "Hire";
     hireBtn.disabled = atCap || state.gold < hireCost();
-    hireBtn.addEventListener("click", hireRecruit);
+    actionButton(hireBtn, "hire");
     hire.appendChild(hireBtn);
-    el.bandList.appendChild(hire);
+    frag.appendChild(hire);
 
     // Rally (free, cooldown)
     const left = rallyRemaining();
     const rally = document.createElement("article");
     rally.className = "card" + (left > 0 ? " cooling" : "");
+    rally.setAttribute("data-key", "band:rally");
     rally.innerHTML =
       '<div class="card-body"><h3>Sound the Muster Horn</h3>' +
       '<p class="card-meta">A free recruit every ' +
@@ -2706,9 +2820,9 @@
     rallyBtn.id = "btn-rally";
     rallyBtn.textContent = atCap ? "At cap" : left > 0 ? "Wait " + formatCooldown(left) : "Rally";
     rallyBtn.disabled = atCap || left > 0;
-    rallyBtn.addEventListener("click", rallyRecruit);
+    actionButton(rallyBtn, "rally");
     rally.appendChild(rallyBtn);
-    el.bandList.appendChild(rally);
+    frag.appendChild(rally);
 
     // Named knights
     NAMED_KNIGHTS.forEach(function (k) {
@@ -2716,6 +2830,7 @@
       const locked = state.level < k.minLevel && !owned;
       const card = document.createElement("article");
       card.className = "card" + (owned ? " owned" : "") + (locked ? " locked" : "");
+      card.setAttribute("data-key", "named:" + k.id);
       card.innerHTML =
         '<div class="card-body"><h3>' +
         escapeHtml(k.name) +
@@ -2741,18 +2856,17 @@
       } else {
         btn.textContent = locked ? "Locked" : "Recruit";
         btn.disabled = locked || state.gold < k.cost;
-        btn.addEventListener("click", function () {
-          recruitNamed(k.id);
-        });
+        actionButton(btn, "named", k.id);
       }
       card.appendChild(btn);
-      el.bandList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.bandList, frag);
   }
 
   function renderCollections() {
     if (!el.collectionsList) return;
-    el.collectionsList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     COLLECTIONS.forEach(function (set) {
       const region = getRegion(set.region);
       const redeemed = collectionRedeemed(set.id);
@@ -2763,6 +2877,7 @@
       const card = document.createElement("article");
       card.className = "card collection-card" + (redeemed ? " owned" : "");
       card.setAttribute("data-set", set.id);
+      card.setAttribute("data-key", "set:" + set.id);
       const pieces = set.pieces
         .map(function (p) {
           const n = pieceCount(p.id);
@@ -2802,17 +2917,16 @@
       } else {
         btn.textContent = complete ? "Redeem" : "Incomplete";
         btn.disabled = !complete;
-        btn.addEventListener("click", function () {
-          redeemCollection(set.id);
-        });
+        actionButton(btn, "redeem", set.id);
       }
       card.appendChild(btn);
-      el.collectionsList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.collectionsList, frag);
   }
 
   function renderHeals() {
-    el.healList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     HEALS.forEach(function (h) {
       const atFull = state.health >= state.healthMax;
       const canAfford = state.gold >= h.cost;
@@ -2820,6 +2934,7 @@
         h.heal === "full" ? "Full heal" : "+" + h.heal + " HP";
       const card = document.createElement("article");
       card.className = "card";
+      card.setAttribute("data-key", "heal:" + h.id);
       card.innerHTML =
         '<div class="card-body">' +
         "<h3>" +
@@ -2846,18 +2961,17 @@
       } else {
         btn.textContent = "Heal";
         btn.disabled = !canAfford;
-        btn.addEventListener("click", function () {
-          doHeal(h.id);
-        });
+        actionButton(btn, "heal", h.id);
       }
       card.appendChild(btn);
-      el.healList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.healList, frag);
   }
 
   function renderHoldings() {
     if (!el.holdingsList) return;
-    el.holdingsList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     HOLDINGS.forEach(function (def) {
       const h = holdingState(def.id);
       const locked = state.level < def.minLevel && !h.owned;
@@ -2867,6 +2981,7 @@
       const card = document.createElement("article");
       card.className =
         "card" + (h.owned ? " owned" : "") + (locked ? " locked" : "");
+      card.setAttribute("data-key", "holding:" + def.id);
 
       let metaExtra = "";
       if (h.owned) {
@@ -2922,9 +3037,7 @@
         buyBtn.className = "btn btn-primary";
         buyBtn.textContent = locked ? "Locked" : "Buy";
         buyBtn.disabled = locked || state.gold < def.cost;
-        buyBtn.addEventListener("click", function () {
-          buyHolding(def.id);
-        });
+        actionButton(buyBtn, "buy-holding", def.id);
         actions.appendChild(buyBtn);
       } else {
         const collectBtn = document.createElement("button");
@@ -2932,9 +3045,7 @@
         collectBtn.className = "btn btn-primary";
         collectBtn.textContent = pending > 0 ? "Collect (" + pending + ")" : "Collect";
         collectBtn.disabled = pending <= 0;
-        collectBtn.addEventListener("click", function () {
-          collectHolding(def.id);
-        });
+        actionButton(collectBtn, "collect-holding", def.id);
         actions.appendChild(collectBtn);
 
         if (h.level < def.maxLevel) {
@@ -2944,16 +3055,15 @@
           upBtn.className = "btn";
           upBtn.textContent = "Upgrade (" + upCost + "g)";
           upBtn.disabled = state.gold < upCost;
-          upBtn.addEventListener("click", function () {
-            upgradeHolding(def.id);
-          });
+          actionButton(upBtn, "upgrade-holding", def.id);
           actions.appendChild(upBtn);
         }
       }
 
       card.appendChild(actions);
-      el.holdingsList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.holdingsList, frag);
   }
 
   function renderInventory() {
@@ -2964,22 +3074,24 @@
     const aId = state.equipped && state.equipped.armor;
     const wName = wId && getLootDef(wId) ? getLootDef(wId).name : "none";
     const aName = aId && getLootDef(aId) ? getLootDef(aId).name : "none";
-    el.equipSummary.innerHTML =
+    patchHtml(
+      el.equipSummary,
       "<strong>Weapon:</strong> " +
-      escapeHtml(wName) +
-      " · <strong>Armor:</strong> " +
-      escapeHtml(aName) +
-      " · bonuses +" +
-      eq.attack +
-      " atk, +" +
-      eq.defense +
-      " def, +" +
-      Math.round(eq.goldMult * 100) +
-      "% gold, +" +
-      Math.round(eq.xpMult * 100) +
-      "% XP (incl. relics)";
+        escapeHtml(wName) +
+        " · <strong>Armor:</strong> " +
+        escapeHtml(aName) +
+        " · bonuses +" +
+        eq.attack +
+        " atk, +" +
+        eq.defense +
+        " def, +" +
+        Math.round(eq.goldMult * 100) +
+        "% gold, +" +
+        Math.round(eq.xpMult * 100) +
+        "% XP (incl. relics)"
+    );
 
-    el.inventoryList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     let any = false;
     LOOT.forEach(function (item) {
       const count = inventoryCount(item.id);
@@ -2990,6 +3102,7 @@
         (item.slot === "armor" && state.equipped.armor === item.id);
       const card = document.createElement("article");
       card.className = "card" + (isEquipped ? " equipped" : "");
+      card.setAttribute("data-key", "item:" + item.id);
       card.innerHTML =
         '<div class="card-body">' +
         "<h3>" +
@@ -3013,18 +3126,14 @@
           uneq.type = "button";
           uneq.className = "btn";
           uneq.textContent = "Unequip";
-          uneq.addEventListener("click", function () {
-            unequipSlot(item.slot);
-          });
+          actionButton(uneq, "unequip", item.slot);
           actions.appendChild(uneq);
         } else {
           const eqBtn = document.createElement("button");
           eqBtn.type = "button";
           eqBtn.className = "btn btn-primary";
           eqBtn.textContent = "Equip";
-          eqBtn.addEventListener("click", function () {
-            equipItem(item.id);
-          });
+          actionButton(eqBtn, "equip", item.id);
           actions.appendChild(eqBtn);
         }
       } else {
@@ -3037,7 +3146,7 @@
       }
 
       card.appendChild(actions);
-      el.inventoryList.appendChild(card);
+      frag.appendChild(card);
     });
 
     if (!any) {
@@ -3045,16 +3154,18 @@
       empty.className = "legend-empty";
       empty.textContent =
         "No loot yet. Complete quests (~22% drop chance) or win fights to find gear; bosses drop uniques.";
-      el.inventoryList.appendChild(empty);
+      frag.appendChild(empty);
     }
+    patchChildren(el.inventoryList, frag);
   }
 
   function renderShop() {
-    el.shopList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     UPGRADES.forEach(function (u) {
       const owned = !!state.ownedUpgrades[u.id];
       const card = document.createElement("article");
       card.className = "card" + (owned ? " owned" : "");
+      card.setAttribute("data-key", "upgrade:" + u.id);
       card.innerHTML =
         '<div class="card-body">' +
         "<h3>" +
@@ -3077,34 +3188,35 @@
       } else {
         btn.textContent = "Buy";
         btn.disabled = state.gold < u.cost;
-        btn.addEventListener("click", function () {
-          buyUpgrade(u.id);
-        });
+        actionButton(btn, "upgrade", u.id);
       }
       card.appendChild(btn);
-      el.shopList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.shopList, frag);
   }
 
   function renderLog() {
-    el.log.innerHTML = "";
+    const frag = document.createDocumentFragment();
     logLines.forEach(function (line) {
       const li = document.createElement("li");
       li.textContent = line;
-      el.log.appendChild(li);
+      frag.appendChild(li);
     });
+    patchChildren(el.log, frag);
   }
 
   function renderLegends() {
     if (!el.legendsList) return;
-    el.legendsList.innerHTML = "";
+    const frag = document.createDocumentFragment();
     const list = (state.storyUnlocks || []).slice().reverse();
     if (list.length === 0) {
       const empty = document.createElement("p");
       empty.className = "legend-empty";
       empty.textContent =
         "No legends yet. Reach mastery ranks (5 / 15 / 40 completions) on any quest, or slay a boss.";
-      el.legendsList.appendChild(empty);
+      frag.appendChild(empty);
+      patchChildren(el.legendsList, frag);
       return;
     }
     list.forEach(function (entry) {
@@ -3119,8 +3231,24 @@
         "<p>" +
         escapeHtml(entry.text) +
         "</p>";
-      el.legendsList.appendChild(card);
+      frag.appendChild(card);
     });
+    patchChildren(el.legendsList, frag);
+  }
+
+  /** Everything that can change without a player action (timers, regen, accrual). */
+  function renderLive() {
+    renderStatsOnly();
+    renderRegions();
+    renderQuests();
+    renderFights();
+    renderBosses();
+    renderHeals();
+    renderBand();
+    renderHoldings();
+    renderInventory();
+    renderCollections();
+    renderShop();
   }
 
   function render() {
@@ -3151,6 +3279,13 @@
 
   el.btnRename.addEventListener("click", renamePlayer);
   el.btnReset.addEventListener("click", resetGame);
+  document.addEventListener("click", onActionClick);
+  // Tick saves are throttled, so flush whenever the page may go away.
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") save();
+  });
+  window.addEventListener("pagehide", save);
+  window.addEventListener("beforeunload", save);
 
   load();
   if (logLines.length === 0) {
@@ -3165,6 +3300,10 @@
     getState: function () {
       return Object.assign({}, state);
     },
+    getLog: function () {
+      return logLines.slice();
+    },
+    save: save,
     QUESTS: QUESTS,
     FOES: FOES,
     HEALS: HEALS,
