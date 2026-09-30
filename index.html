@@ -55,6 +55,11 @@
         <div class="bar" aria-hidden="true"><div id="health-bar" class="bar-fill health"></div></div>
         <span class="regen-hint" id="health-regen-hint">+1 / 15s</span>
       </div>
+      <div class="stat">
+        <span class="label">Band</span>
+        <strong><span id="stat-band">0</span> / <span id="stat-band-cap">3</span></strong>
+        <span class="regen-hint" id="band-hint">Atk 8 · Def 3</span>
+      </div>
     </section>
 
     <main class="main">
@@ -62,7 +67,10 @@
         <h2 id="quests-heading">Quests</h2>
         <p class="panel-intro">
           Spend Energy on jobs. Earn gold and XP. Mastery ranks unlock at 5 / 15 / 40 completions.
+          Avalon opens at Level 10, the Wastes at Level 20.
         </p>
+        <div id="region-tabs" class="region-tabs" role="tablist" aria-label="Regions"></div>
+        <p class="panel-intro region-intro" id="region-intro"></p>
         <div id="quest-list" class="card-list"></div>
       </section>
 
@@ -77,6 +85,25 @@
         <div id="heal-list" class="card-list"></div>
       </section>
 
+      <section class="panel" aria-labelledby="bosses-heading">
+        <h2 id="bosses-heading">Bosses</h2>
+        <p class="panel-intro">
+          Great foes with vast HP. Each strike costs Stamina; the wounds you deal persist between strikes
+          and heal only slowly. Slay them for great rewards, then wait for their return.
+        </p>
+        <div id="boss-list" class="card-list"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="band-heading">
+        <h2 id="band-heading">Knight Band</h2>
+        <p class="panel-intro">
+          Knights who ride under your banner. Each raises your attack and defense in The Lists and against
+          bosses. How many sworn knights you can lead grows with your level.
+        </p>
+        <div id="band-summary" class="equip-summary"></div>
+        <div id="band-list" class="card-list"></div>
+      </section>
+
       <section class="panel" aria-labelledby="holdings-heading">
         <h2 id="holdings-heading">Holdings</h2>
         <p class="panel-intro">
@@ -88,10 +115,19 @@
       <section class="panel" aria-labelledby="inventory-heading">
         <h2 id="inventory-heading">Inventory</h2>
         <p class="panel-intro">
-          Loot from quests. Equip one weapon and one armor; relics grant passive bonuses while kept.
+          Loot from quests, fights and bosses. Equip one weapon and one armor; relics grant passive bonuses while kept.
         </p>
         <div id="equip-summary" class="equip-summary"></div>
         <div id="inventory-list" class="card-list"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="collections-heading">
+        <h2 id="collections-heading">Collections</h2>
+        <p class="panel-intro">
+          Set pieces drop from quests in each region, from fight wins, and always from bosses. Duplicates are kept.
+          Complete a set to redeem it once for a permanent bonus (uses one of each piece).
+        </p>
+        <div id="collections-list" class="card-list"></div>
       </section>
 
       <section class="panel" aria-labelledby="shop-heading">
@@ -104,13 +140,13 @@
         <h2 id="log-heading">Chronicle</h2>
         <ul id="log" class="log" aria-live="polite"></ul>
         <h3 class="subhead" id="legends-heading">Legends</h3>
-        <p class="panel-intro">Story beats unlocked by quest mastery. Re-read them here.</p>
+        <p class="panel-intro">Story beats unlocked by quest mastery and boss kills. Re-read them here.</p>
         <div id="legends-list" class="legends-list"></div>
       </section>
     </main>
 
     <footer class="footer">
-      <span>Ruin Wars v0.3 — local save in this browser</span>
+      <span>Ruin Wars v0.4 — local save in this browser</span>
     </footer>
   </div>
   <script src="game.js"></script>

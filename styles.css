@@ -18,6 +18,7 @@
   --locked: #5a5040;
   --danger: #b05050;
   --mastery: #9a7ab8;
+  --boss: #5f9a4a;
   --shadow: rgba(0, 0, 0, 0.45);
   --radius: 6px;
   --font: "Segoe UI", Georgia, "Times New Roman", serif;
@@ -422,6 +423,59 @@ body {
   color: var(--locked);
   font-size: 0.85rem;
   font-style: italic;
+}
+
+.region-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.region-tab.active {
+  background: #4a2e22;
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+.region-intro {
+  font-style: italic;
+}
+
+.bar-fill.boss {
+  background: linear-gradient(90deg, var(--health), var(--boss));
+}
+
+.boss-bar {
+  height: 8px;
+  margin: 0.3rem 0 0.4rem;
+}
+
+.card.cooling {
+  border-style: dashed;
+}
+
+.piece-list {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.piece-list .piece {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+  color: var(--locked);
+}
+
+.piece-list .piece.have {
+  border-style: solid;
+  border-color: var(--mastery);
+  color: var(--text);
 }
 
 .footer {
