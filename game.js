@@ -1,7 +1,8 @@
 /**
- * Ruin Wars — core game loop (v0.4)
- * Quests (Energy) across Regions + mastery/story, The Lists (Stamina/Health), Bosses,
- * Knight Band, Holdings (passive gold), Loot/Inventory (equip), Collections, shop upgrades.
+ * Ruin Wars — core game loop (v0.5)
+ * Quests (Energy) across Regions + mastery/story/requirements, The Lists (Stamina/Health, odds-based
+ * bouts), Bosses, Knight Band, Holdings (passive gold), Loot/Inventory (region tiers, equip, sell),
+ * Collections, shop upgrades + ranked training.
  * Persist: localStorage SAVE_KEY (legacy v0.3 key migrated on load)
  */
 
@@ -10,7 +11,7 @@
 
   const SAVE_KEY = "ruin_wars_save_v4";
   const LEGACY_SAVE_KEYS = ["ruin_wars_save_v1"];
-  const SAVE_VERSION = 4;
+  const SAVE_VERSION = 5;
   const TICK_MS = 1000;
   const BASE_ENERGY_MAX = 25;
   const BASE_STAMINA_MAX = 20;
@@ -22,6 +23,11 @@
   const SAVE_INTERVAL_MS = 8000; // tick-driven saves are throttled to this when state is dirty
   const BLADE_ATTACK_BONUS = 12;
   const LOOT_DROP_CHANCE = 0.22;
+  const LOOT_DROP_FIGHT = 0.12;
+  const FIGHT_ODDS_EXPONENT = 4; // win chance = atk^k / (atk^k + foe^k): 50% at even, ~67% at +20%
+  const FIGHT_ODDS_MIN = 0.05;
+  const FIGHT_ODDS_MAX = 0.95;
+  const UPSET_BONUS = 2; // reward × (1 + UPSET_BONUS × (0.5 − odds)) when winning with odds below 50%
   const MASTERY_THRESHOLDS = [5, 15, 40];
   const MASTERY_RANKS = ["Unproven", "Proven", "Veteran", "Master"];
   const HOLDING_CAP_CYCLES = 2;
@@ -110,6 +116,10 @@
     },
   ];
 
+  /**
+   * Quest `requires` (all optional): band = minimum knights in your band (sworn + named),
+   * weapon / armor = something must be equipped in that slot.
+   */
   const QUESTS = [
     {
       id: "patrol",
@@ -150,6 +160,7 @@
       gold: 95,
       xp: 110,
       minLevel: 3,
+      requires: { band: 2 },
     },
     {
       id: "siege",
@@ -160,6 +171,7 @@
       gold: 140,
       xp: 155,
       minLevel: 5,
+      requires: { band: 4 },
     },
     {
       id: "grail",
@@ -170,6 +182,7 @@
       gold: 210,
       xp: 230,
       minLevel: 7,
+      requires: { band: 6, weapon: true },
     },
     // --- Avalon (Level 10+) ---
     {
@@ -203,6 +216,7 @@
       gold: 380,
       xp: 370,
       minLevel: 12,
+      requires: { band: 10 },
       cooldownMs: 180000,
     },
     {
@@ -214,6 +228,7 @@
       gold: 450,
       xp: 420,
       minLevel: 14,
+      requires: { armor: true },
       cooldownMs: 195000,
     },
     {
@@ -225,6 +240,7 @@
       gold: 540,
       xp: 480,
       minLevel: 16,
+      requires: { band: 14 },
       cooldownMs: 210000,
     },
     {
@@ -236,6 +252,7 @@
       gold: 640,
       xp: 550,
       minLevel: 18,
+      requires: { band: 16, weapon: true, armor: true },
       cooldownMs: 225000,
     },
     // --- The Wastes (Level 20+) ---
@@ -248,6 +265,7 @@
       gold: 600,
       xp: 560,
       minLevel: 20,
+      requires: { band: 16 },
       cooldownMs: 210000,
     },
     {
@@ -259,6 +277,7 @@
       gold: 720,
       xp: 650,
       minLevel: 21,
+      requires: { weapon: true },
       cooldownMs: 225000,
     },
     {
@@ -270,6 +289,7 @@
       gold: 860,
       xp: 740,
       minLevel: 23,
+      requires: { band: 22 },
       cooldownMs: 240000,
     },
     {
@@ -281,6 +301,7 @@
       gold: 1000,
       xp: 830,
       minLevel: 25,
+      requires: { band: 24, armor: true },
       cooldownMs: 255000,
     },
     {
@@ -292,6 +313,7 @@
       gold: 1180,
       xp: 930,
       minLevel: 27,
+      requires: { band: 28 },
       cooldownMs: 270000,
     },
     {
@@ -303,6 +325,7 @@
       gold: 1400,
       xp: 1050,
       minLevel: 30,
+      requires: { band: 30, weapon: true, armor: true },
       cooldownMs: 300000,
     },
   ];
@@ -487,6 +510,7 @@
     },
     {
       id: "faerie_champion",
+      region: "avalon",
       name: "Faerie Champion",
       desc: "Avalon's duellist; blade of glass, grin of a cat.",
       stamina: 14,
@@ -500,6 +524,7 @@
     },
     {
       id: "outrider",
+      region: "wastes",
       name: "Mordred's Outrider",
       desc: "Black-mailed scout of the traitor prince, out of the Wastes.",
       stamina: 16,
@@ -551,6 +576,58 @@
       desc: "+30% XP from every quest",
       cost: 70,
       effect: { xpMult: 0.3 },
+    },
+  ];
+
+  /**
+   * Ranked training — bought again and again. Cost of the next rank = baseCost × growth^rank
+   * (rounded to 5). Effects are per rank and stack with everything else.
+   */
+  const RANKED_UPGRADES = [
+    {
+      id: "whetstone",
+      name: "Whetstone Drills",
+      desc: "+4 attack per rank",
+      baseCost: 150,
+      growth: 1.35,
+      maxRank: 20,
+      effect: { attack: 4 },
+    },
+    {
+      id: "shieldwall",
+      name: "Shield-Wall Drills",
+      desc: "+4 defense per rank",
+      baseCost: 150,
+      growth: 1.35,
+      maxRank: 20,
+      effect: { defense: 4 },
+    },
+    {
+      id: "ledger",
+      name: "Steward's Ledger",
+      desc: "+3% gold per rank",
+      baseCost: 250,
+      growth: 1.4,
+      maxRank: 20,
+      effect: { goldMult: 0.03 },
+    },
+    {
+      id: "tomes",
+      name: "Scholar's Tomes",
+      desc: "+3% XP per rank",
+      baseCost: 250,
+      growth: 1.4,
+      maxRank: 20,
+      effect: { xpMult: 0.03 },
+    },
+    {
+      id: "wagon",
+      name: "Provisioner's Wagon",
+      desc: "+3 max Energy per rank",
+      baseCost: 400,
+      growth: 1.5,
+      maxRank: 10,
+      effect: { energyMax: 3 },
     },
   ];
 
@@ -640,78 +717,282 @@
    * Loot table — weapons/armor equip (1 each); relics are passive while owned.
    * weight: relative drop weight when a loot roll succeeds.
    */
+  /**
+   * Loot. Random drops come from the pool of the region they were won in (quest region, or the
+   * foe's region in The Lists), so later regions drop stronger gear. `value` = gold when sold.
+   */
   const LOOT = [
     {
       id: "ashwood_spear",
+      region: "camelot",
       name: "Ashwood Spear",
       slot: "weapon",
       desc: "+4 fight power",
       weight: 28,
+      value: 15,
       effect: { attack: 4 },
     },
     {
       id: "knight_longsword",
+      region: "camelot",
       name: "Knight's Longsword",
       slot: "weapon",
       desc: "+9 fight power",
       weight: 16,
+      value: 40,
       effect: { attack: 9 },
     },
     {
       id: "grail_blade",
+      region: "camelot",
       name: "Grail-Touched Blade",
       slot: "weapon",
       desc: "+15 fight power",
       weight: 6,
+      value: 120,
       effect: { attack: 15 },
     },
     {
       id: "leather_brigandine",
+      region: "camelot",
       name: "Leather Brigandine",
       slot: "armor",
       desc: "+3% quest gold",
       weight: 26,
+      value: 15,
       effect: { goldMult: 0.03 },
     },
     {
       id: "mail_hauberk",
+      region: "camelot",
       name: "Mail Hauberk",
       slot: "armor",
       desc: "+6% quest gold; +3 fight power",
       weight: 14,
+      value: 40,
       effect: { goldMult: 0.06, attack: 3 },
     },
     {
       id: "sanctified_plate",
+      region: "camelot",
       name: "Sanctified Plate",
       slot: "armor",
       desc: "+10% quest gold; +5 fight power",
       weight: 5,
+      value: 120,
       effect: { goldMult: 0.1, attack: 5 },
     },
     {
       id: "pilgrim_token",
+      region: "camelot",
       name: "Pilgrim's Token",
       slot: "relic",
       desc: "+3% XP (passive while kept)",
       weight: 20,
+      value: 20,
       effect: { xpMult: 0.03 },
     },
     {
       id: "fen_wyrm_scale",
+      region: "camelot",
       name: "Fen Wyrm Scale",
       slot: "relic",
       desc: "+4% gold (passive while kept)",
       weight: 14,
+      value: 30,
       effect: { goldMult: 0.04 },
     },
     {
       id: "chalice_shard",
+      region: "camelot",
       name: "Broken Chalice Shard",
       slot: "relic",
       desc: "+3% XP and +2% gold (passive)",
       weight: 8,
+      value: 60,
       effect: { xpMult: 0.03, goldMult: 0.02 },
+    },
+    // --- Avalon (quests and foes from Level 10) ---
+    {
+      id: "lakesteel_sword",
+      region: "avalon",
+      name: "Lakesteel Sword",
+      slot: "weapon",
+      desc: "+22 fight power",
+      weight: 28,
+      value: 80,
+      effect: { attack: 22 },
+    },
+    {
+      id: "glass_rapier",
+      region: "avalon",
+      name: "Faerie-Glass Rapier",
+      slot: "weapon",
+      desc: "+32 fight power",
+      weight: 14,
+      value: 200,
+      effect: { attack: 32 },
+    },
+    {
+      id: "avalon_lance",
+      region: "avalon",
+      name: "Lance of Avalon",
+      slot: "weapon",
+      desc: "+45 fight power, +5 defense",
+      weight: 5,
+      value: 600,
+      effect: { attack: 45, defense: 5 },
+    },
+    {
+      id: "mistweave_gambeson",
+      region: "avalon",
+      name: "Mistweave Gambeson",
+      slot: "armor",
+      desc: "+8% gold; +10 defense",
+      weight: 26,
+      value: 80,
+      effect: { goldMult: 0.08, defense: 10 },
+    },
+    {
+      id: "lakeshore_hauberk",
+      region: "avalon",
+      name: "Lakeshore Hauberk",
+      slot: "armor",
+      desc: "+12% gold; +18 defense, +6 fight power",
+      weight: 14,
+      value: 200,
+      effect: { goldMult: 0.12, defense: 18, attack: 6 },
+    },
+    {
+      id: "blessed_plate",
+      region: "avalon",
+      name: "Lady's Blessed Plate",
+      slot: "armor",
+      desc: "+16% gold; +28 defense, +10 fight power",
+      weight: 5,
+      value: 600,
+      effect: { goldMult: 0.16, defense: 28, attack: 10 },
+    },
+    {
+      id: "apple_seed",
+      region: "avalon",
+      name: "Avalon Apple Seed",
+      slot: "relic",
+      desc: "+5% XP (passive while kept)",
+      weight: 20,
+      value: 100,
+      effect: { xpMult: 0.05 },
+    },
+    {
+      id: "faerie_token",
+      region: "avalon",
+      name: "Faerie Ring Token",
+      slot: "relic",
+      desc: "+6% gold (passive while kept)",
+      weight: 14,
+      value: 150,
+      effect: { goldMult: 0.06 },
+    },
+    {
+      id: "lake_pearl",
+      region: "avalon",
+      name: "Silver Lake Pearl",
+      slot: "relic",
+      desc: "+5% XP and +4% gold (passive)",
+      weight: 8,
+      value: 300,
+      effect: { xpMult: 0.05, goldMult: 0.04 },
+    },
+    // --- The Wastes (quests and foes from Level 20) ---
+    {
+      id: "ashen_warblade",
+      region: "wastes",
+      name: "Ashen Warblade",
+      slot: "weapon",
+      desc: "+40 fight power",
+      weight: 28,
+      value: 200,
+      effect: { attack: 40 },
+    },
+    {
+      id: "barrow_axe",
+      region: "wastes",
+      name: "Barrow-King's Axe",
+      slot: "weapon",
+      desc: "+55 fight power, +5 defense",
+      weight: 14,
+      value: 500,
+      effect: { attack: 55, defense: 5 },
+    },
+    {
+      id: "fisher_spear",
+      region: "wastes",
+      name: "Fisher King's Spear",
+      slot: "weapon",
+      desc: "+75 fight power, +10 defense",
+      weight: 5,
+      value: 1500,
+      effect: { attack: 75, defense: 10 },
+    },
+    {
+      id: "ash_brigandine",
+      region: "wastes",
+      name: "Ash-Grey Brigandine",
+      slot: "armor",
+      desc: "+10% gold; +18 defense",
+      weight: 26,
+      value: 200,
+      effect: { goldMult: 0.1, defense: 18 },
+    },
+    {
+      id: "barrow_mail",
+      region: "wastes",
+      name: "Barrow Mail",
+      slot: "armor",
+      desc: "+15% gold; +30 defense, +10 fight power",
+      weight: 14,
+      value: 500,
+      effect: { goldMult: 0.15, defense: 30, attack: 10 },
+    },
+    {
+      id: "pendragon_plate",
+      region: "wastes",
+      name: "Pendragon Plate",
+      slot: "armor",
+      desc: "+20% gold; +45 defense, +15 fight power",
+      weight: 5,
+      value: 1500,
+      effect: { goldMult: 0.2, defense: 45, attack: 15 },
+    },
+    {
+      id: "crow_feather",
+      region: "wastes",
+      name: "Blighted Crow Feather",
+      slot: "relic",
+      desc: "+6% XP (passive while kept)",
+      weight: 20,
+      value: 250,
+      effect: { xpMult: 0.06 },
+    },
+    {
+      id: "hack_silver",
+      region: "wastes",
+      name: "Saxon Hack-Silver",
+      slot: "relic",
+      desc: "+8% gold (passive while kept)",
+      weight: 14,
+      value: 350,
+      effect: { goldMult: 0.08 },
+    },
+    {
+      id: "fisher_hook",
+      region: "wastes",
+      name: "Fisher King's Hook",
+      slot: "relic",
+      desc: "+7% XP and +5% gold (passive)",
+      weight: 8,
+      value: 700,
+      effect: { xpMult: 0.07, goldMult: 0.05 },
     },
     // Boss uniques (weight 0 = never from random rolls)
     {
@@ -720,6 +1001,7 @@
       slot: "relic",
       desc: "Boss unique: +15 defense, +5% XP (passive)",
       weight: 0,
+      value: 1000,
       unique: true,
       effect: { defense: 15, xpMult: 0.05 },
     },
@@ -727,10 +1009,11 @@
       id: "clarent",
       name: "Clarent",
       slot: "weapon",
-      desc: "Boss unique: +30 fight power, +5 defense",
+      desc: "Boss unique: +85 fight power, +15 defense",
       weight: 0,
+      value: 3000,
       unique: true,
-      effect: { attack: 30, defense: 5 },
+      effect: { attack: 85, defense: 15 },
     },
   ];
 
@@ -877,6 +1160,7 @@
       healthMax: BASE_HEALTH_MAX,
       fallen: false,
       ownedUpgrades: {},
+      upgradeRanks: {},
       questCooldownUntil: {},
       fightCooldownUntil: {},
       questCounts: {},
@@ -955,6 +1239,13 @@
     return (state.inventory && state.inventory[itemId]) || 0;
   }
 
+  /** The loot def equipped in a slot, if it is still owned. */
+  function equippedItem(slot) {
+    const id = state.equipped && state.equipped[slot];
+    const item = id ? getLootDef(id) : null;
+    return item && inventoryCount(item.id) > 0 ? item : null;
+  }
+
   function collectEquipEffects() {
     let attack = 0;
     let defense = 0;
@@ -969,14 +1260,10 @@
       if (eff.xpMult) xpMult += eff.xpMult;
     }
 
-    if (state.equipped && state.equipped.weapon) {
-      const w = getLootDef(state.equipped.weapon);
-      if (w && inventoryCount(w.id) > 0) applyEffect(w.effect);
-    }
-    if (state.equipped && state.equipped.armor) {
-      const a = getLootDef(state.equipped.armor);
-      if (a && inventoryCount(a.id) > 0) applyEffect(a.effect);
-    }
+    const w = equippedItem("weapon");
+    if (w) applyEffect(w.effect);
+    const a = equippedItem("armor");
+    if (a) applyEffect(a.effect);
     // Relics: passive if owned (count > 0)
     LOOT.forEach(function (L) {
       if (L.slot === "relic" && inventoryCount(L.id) > 0) {
@@ -1160,6 +1447,7 @@
     const eq = collectEquipEffects();
     m += eq.goldMult;
     m += collectionBonuses().goldMult;
+    m += rankedBonuses().goldMult;
     if (questId) {
       m += masteryBonusForQuest(questId).goldAdd;
     }
@@ -1176,6 +1464,7 @@
     const eq = collectEquipEffects();
     m += eq.xpMult;
     m += collectionBonuses().xpMult;
+    m += rankedBonuses().xpMult;
     m += bandBonuses().xpMult;
     if (questId) {
       m += masteryBonusForQuest(questId).xpAdd;
@@ -1193,6 +1482,29 @@
     return bonus;
   }
 
+  function upgradeRank(id) {
+    return (state.upgradeRanks && state.upgradeRanks[id]) || 0;
+  }
+
+  /** Gold for the next rank of a ranked upgrade (null when maxed). */
+  function rankedUpgradeCost(def) {
+    const rank = upgradeRank(def.id);
+    if (rank >= def.maxRank) return null;
+    return Math.round((def.baseCost * Math.pow(def.growth, rank)) / 5) * 5;
+  }
+
+  function rankedBonuses() {
+    const out = { attack: 0, defense: 0, goldMult: 0, xpMult: 0, energyMax: 0 };
+    RANKED_UPGRADES.forEach(function (def) {
+      const rank = upgradeRank(def.id);
+      if (!rank) return;
+      Object.keys(out).forEach(function (k) {
+        if (def.effect[k]) out[k] += def.effect[k] * rank;
+      });
+    });
+    return out;
+  }
+
   function regenIntervalMs() {
     let bonus = 0;
     for (const u of UPGRADES) {
@@ -1203,12 +1515,13 @@
     return Math.max(2500, Math.floor(BASE_REGEN_MS / (1 + bonus)));
   }
 
-  /** Attack rating without the fight roll: level + shop + gear + band + collections */
+  /** Attack rating: level + shop + training + gear + band + collections */
   function attackRating() {
     const eq = collectEquipEffects();
     return (
       state.level * 8 +
       attackBonusFromShop() +
+      rankedBonuses().attack +
       eq.attack +
       bandBonuses().attack +
       collectionBonuses().attack
@@ -1218,7 +1531,13 @@
   /** Defense rating: soaks a share of fight and boss damage */
   function defenseRating() {
     const eq = collectEquipEffects();
-    return state.level * 3 + eq.defense + bandBonuses().defense + collectionBonuses().defense;
+    return (
+      state.level * 3 +
+      rankedBonuses().defense +
+      eq.defense +
+      bandBonuses().defense +
+      collectionBonuses().defense
+    );
   }
 
   function soakDamage(dmg) {
@@ -1226,17 +1545,48 @@
     return Math.max(1, Math.round(dmg * (1 - def / (def + DEFENSE_SOAK))));
   }
 
-  function playerPower() {
-    return attackRating() + randInt(-6, 6);
+  /** Chance to win a bout in The Lists: 50% at even power, rising / falling steeply with the ratio. */
+  function fightWinChance(foe) {
+    const atk = Math.max(1, attackRating());
+    const a = Math.pow(atk, FIGHT_ODDS_EXPONENT);
+    const f = Math.pow(foe.power, FIGHT_ODDS_EXPONENT);
+    return Math.min(FIGHT_ODDS_MAX, Math.max(FIGHT_ODDS_MIN, a / (a + f)));
   }
 
-  function foePower(foe) {
-    return foe.power + randInt(-8, 8);
+  /** Reward multiplier for winning as the underdog (1 when odds were 50% or better). */
+  function upsetMultiplier(odds) {
+    return 1 + UPSET_BONUS * Math.max(0, 0.5 - odds);
+  }
+
+  // --- Quest requirements ---
+
+  /** Each requirement of a quest with whether it is met: [{ label, met }] */
+  function questRequirements(quest) {
+    const r = quest.requires;
+    if (!r) return [];
+    const out = [];
+    if (r.band) {
+      out.push({ label: r.band + " knights in band", met: bandSize() >= r.band });
+    }
+    if (r.weapon) {
+      out.push({ label: "a weapon equipped", met: !!equippedItem("weapon") });
+    }
+    if (r.armor) {
+      out.push({ label: "armor equipped", met: !!equippedItem("armor") });
+    }
+    return out;
+  }
+
+  function unmetRequirements(quest) {
+    return questRequirements(quest).filter(function (req) {
+      return !req.met;
+    });
   }
 
   function syncMaxesFromLevel() {
     const cb = collectionBonuses();
-    state.energyMax = BASE_ENERGY_MAX + (state.level - 1) * 2 + cb.energyMax;
+    state.energyMax =
+      BASE_ENERGY_MAX + (state.level - 1) * 2 + cb.energyMax + rankedBonuses().energyMax;
     state.staminaMax = BASE_STAMINA_MAX + (state.level - 1) * 1 + cb.staminaMax;
     state.healthMax = BASE_HEALTH_MAX + (state.level - 1) * 5;
   }
@@ -1358,9 +1708,10 @@
 
   // --- Loot roll ---
 
-  function rollLootDrop() {
+  /** Weighted roll from one region's loot pool (boss uniques never roll randomly). */
+  function rollLootDrop(regionId) {
     const pool = LOOT.filter(function (L) {
-      return L.weight > 0; // boss uniques never roll randomly
+      return L.weight > 0 && L.region === (regionId || "camelot");
     });
     const total = pool.reduce(function (s, L) {
       return s + L.weight;
@@ -1431,6 +1782,10 @@
       if (!state.ownedUpgrades || typeof state.ownedUpgrades !== "object") {
         state.ownedUpgrades = {};
       }
+      // v0.5 fields
+      if (!state.upgradeRanks || typeof state.upgradeRanks !== "object") {
+        state.upgradeRanks = {};
+      }
       if (!state.questCounts || typeof state.questCounts !== "object") {
         state.questCounts = {};
       }
@@ -1472,9 +1827,15 @@
       state.health = Math.min(Math.max(0, state.health), state.healthMax);
       clearFallenIfHealed();
       applyOfflineRegen();
-      if (migratedFrom || oldVersion < SAVE_VERSION) {
+      if (migratedFrom || oldVersion < 4) {
         addLog(
           "Save migrated to v0.4 — Regions, Bosses, Knight Band and Collections are now open to you."
+        );
+      }
+      if (migratedFrom || oldVersion < SAVE_VERSION) {
+        addLog(
+          "Save updated to v0.5 — ranked training in the Armory, stronger loot in Avalon and the Wastes, " +
+            "selling spare loot, odds-based bouts in The Lists, and band / gear requirements on later quests."
         );
         save();
       }
@@ -1634,6 +1995,22 @@
       render();
       return;
     }
+    const unmet = unmetRequirements(quest);
+    if (unmet.length) {
+      addLog(
+        "\"" +
+          quest.name +
+          "\" needs " +
+          unmet
+            .map(function (req) {
+              return req.label;
+            })
+            .join(" and ") +
+          "."
+      );
+      render();
+      return;
+    }
 
     state.energy -= quest.energy;
     if (!state.questCooldownUntil) state.questCooldownUntil = {};
@@ -1664,7 +2041,7 @@
     checkMasteryMilestones(quest.id, newCount);
 
     if (Math.random() < LOOT_DROP_CHANCE) {
-      grantLoot(rollLootDrop());
+      grantLoot(rollLootDrop(quest.region));
     }
     const qSet = COLLECTIONS.find(function (c) {
       return c.region === (quest.region || "camelot");
@@ -1712,13 +2089,14 @@
     if (!state.fightCooldownUntil) state.fightCooldownUntil = {};
     state.fightCooldownUntil[foe.id] = Date.now() + foe.cooldownMs;
 
-    const pPow = playerPower();
-    const fPow = foePower(foe);
-    const won = pPow >= fPow;
+    const odds = fightWinChance(foe);
+    const oddsPct = Math.round(odds * 100) + "%";
+    const won = Math.random() < odds;
 
     if (won) {
-      const goldGain = Math.floor(foe.gold * goldMultiplier());
-      const xpGain = Math.floor(foe.xp * xpMultiplier());
+      const upset = upsetMultiplier(odds);
+      const goldGain = Math.floor(foe.gold * goldMultiplier() * upset);
+      const xpGain = Math.floor(foe.xp * xpMultiplier() * upset);
       state.gold += goldGain;
       state.xp += xpGain;
       let chip = 0;
@@ -1727,13 +2105,12 @@
         state.health = Math.max(0, state.health - chip);
       }
       addLog(
-        "Victory over " +
+        (upset > 1 ? "Upset! " : "") +
+          "Victory over " +
           foe.name +
-          "! (power " +
-          pPow +
-          " vs " +
-          fPow +
-          ") — +" +
+          "! (" +
+          oddsPct +
+          " odds) — +" +
           goldGain +
           " gold, +" +
           xpGain +
@@ -1746,8 +2123,8 @@
         addLog("The bout left you fallen. Seek the Chapel.");
       }
       // Small fight loot chance
-      if (Math.random() < 0.12) {
-        grantLoot(rollLootDrop());
+      if (Math.random() < LOOT_DROP_FIGHT) {
+        grantLoot(rollLootDrop(foe.region));
       }
       if (Math.random() < COLLECTION_DROP_FIGHT) {
         const openSets = COLLECTIONS.filter(function (c) {
@@ -1765,11 +2142,9 @@
       addLog(
         "Defeated by " +
           foe.name +
-          " (power " +
-          pPow +
-          " vs " +
-          fPow +
-          "). Took " +
+          " (" +
+          oddsPct +
+          " odds). Took " +
           dmg +
           " damage. +" +
           pityXp +
@@ -2080,6 +2455,34 @@
     render();
   }
 
+  function buyRankedUpgrade(upgradeId) {
+    const def = RANKED_UPGRADES.find(function (u) {
+      return u.id === upgradeId;
+    });
+    if (!def) return;
+    const cost = rankedUpgradeCost(def);
+    if (cost === null) {
+      addLog(def.name + " is already at its highest rank.");
+      render();
+      return;
+    }
+    if (state.gold < cost) {
+      addLog("Need " + cost + " gold for the next rank of " + def.name + ".");
+      render();
+      return;
+    }
+    state.gold -= cost;
+    if (!state.upgradeRanks) state.upgradeRanks = {};
+    state.upgradeRanks[def.id] = upgradeRank(def.id) + 1;
+    if (def.effect.energyMax) {
+      syncMaxesFromLevel();
+      state.energy = Math.min(state.energyMax, state.energy + def.effect.energyMax);
+    }
+    addLog(def.name + " trained to rank " + upgradeRank(def.id) + " (" + cost + " gold).");
+    save();
+    render();
+  }
+
   function buyHolding(holdingId) {
     const def = HOLDINGS.find(function (h) {
       return h.id === holdingId;
@@ -2184,6 +2587,61 @@
     if (!state.equipped) state.equipped = { weapon: null, armor: null };
     state.equipped[item.slot] = itemId;
     addLog("Equipped " + item.name + ".");
+    save();
+    render();
+  }
+
+  /** Copies of an item that can be sold without losing its effect (keeps the last kept relic / equipped piece). */
+  function sellableCount(item) {
+    const count = inventoryCount(item.id);
+    const keepsOne =
+      item.slot === "relic" || (state.equipped && state.equipped[item.slot] === item.id);
+    return Math.max(0, keepsOne ? count - 1 : count);
+  }
+
+  function sellItem(itemId) {
+    const item = getLootDef(itemId);
+    if (!item) return;
+    if (sellableCount(item) <= 0) {
+      addLog(
+        item.slot === "relic"
+          ? "You keep your last " + item.name + " — its blessing would be lost."
+          : "Unequip " + item.name + " before selling your last one."
+      );
+      render();
+      return;
+    }
+    state.inventory[item.id] -= 1;
+    state.gold += item.value;
+    addLog("Sold " + item.name + " for " + item.value + " gold.");
+    save();
+    render();
+  }
+
+  /** Spares = every copy beyond the first of each item. */
+  function spareTotals() {
+    let count = 0;
+    let gold = 0;
+    LOOT.forEach(function (item) {
+      const spare = Math.max(0, inventoryCount(item.id) - 1);
+      count += spare;
+      gold += spare * item.value;
+    });
+    return { count: count, gold: gold };
+  }
+
+  function sellSpares() {
+    const totals = spareTotals();
+    if (totals.count === 0) {
+      addLog("You have no spare loot to sell.");
+      render();
+      return;
+    }
+    LOOT.forEach(function (item) {
+      if (inventoryCount(item.id) > 1) state.inventory[item.id] = 1;
+    });
+    state.gold += totals.gold;
+    addLog("Sold " + totals.count + " spare items for " + totals.gold + " gold.");
     save();
     render();
   }
@@ -2444,6 +2902,9 @@
     equip: equipItem,
     unequip: unequipSlot,
     upgrade: buyUpgrade,
+    train: buyRankedUpgrade,
+    sell: sellItem,
+    "sell-spares": sellSpares,
   };
 
   function onActionClick(ev) {
@@ -2531,9 +2992,16 @@
       const mb = masteryBonusForQuest(q.id);
       const goldShow = Math.floor(q.gold * goldMultiplier(q.id));
       const xpShow = Math.floor(q.xp * xpMultiplier(q.id));
+      const reqs = questRequirements(q);
+      const unmet = reqs.some(function (req) {
+        return !req.met;
+      });
       const card = document.createElement("article");
       card.className =
-        "card" + (locked ? " locked" : "") + (onCooldown ? " cooling" : "");
+        "card" +
+        (locked ? " locked" : "") +
+        (onCooldown ? " cooling" : "") +
+        (!locked && unmet ? " unmet" : "");
       card.setAttribute("data-key", "quest:" + q.id);
       card.innerHTML =
         '<div class="card-body">' +
@@ -2574,18 +3042,36 @@
             "%xp"
           : "") +
         "</span></p>" +
+        (reqs.length
+          ? '<p class="card-meta requires">Needs: ' +
+            reqs
+              .map(function (req) {
+                return (
+                  '<span class="' +
+                  (req.met ? "req-met" : "req-unmet") +
+                  '">' +
+                  (req.met ? "✓ " : "✗ ") +
+                  escapeHtml(req.label) +
+                  "</span>"
+                );
+              })
+              .join(" · ") +
+            "</p>"
+          : "") +
         "</div>";
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "btn btn-primary";
       if (locked) {
         btn.textContent = "Locked";
+      } else if (unmet) {
+        btn.textContent = "Not ready";
       } else if (onCooldown) {
         btn.textContent = "Wait " + formatCooldown(cdLeft);
       } else {
         btn.textContent = "Embark";
       }
-      btn.disabled = locked || !canAfford || onCooldown;
+      btn.disabled = locked || unmet || !canAfford || onCooldown;
       actionButton(btn, "quest", q.id);
       card.appendChild(btn);
       frag.appendChild(card);
@@ -2601,6 +3087,9 @@
       const canAfford = state.stamina >= f.stamina;
       const cdLeft = fightCooldownRemaining(f.id);
       const onCooldown = cdLeft > 0;
+      const odds = fightWinChance(f);
+      const oddsClass = odds >= 0.65 ? "odds-good" : odds >= 0.4 ? "odds-even" : "odds-risky";
+      const upset = upsetMultiplier(odds);
       const card = document.createElement("article");
       card.className =
         "card" +
@@ -2637,6 +3126,18 @@
           : "") +
         (onCooldown
           ? ' · <span class="gate">Cooldown ' + formatCooldown(cdLeft) + "</span>"
+          : "") +
+        "</p>" +
+        '<p class="card-meta"><span class="' +
+        oddsClass +
+        '">' +
+        Math.round(odds * 100) +
+        "% win chance</span> · power " +
+        attackRating() +
+        " vs " +
+        f.power +
+        (upset > 1
+          ? ' · <span class="upset">upset bonus ×' + upset.toFixed(2) + " rewards</span>"
           : "") +
         "</p>" +
         "</div>";
@@ -3092,6 +3593,20 @@
     );
 
     const frag = document.createDocumentFragment();
+    const spares = spareTotals();
+    if (spares.count > 0) {
+      const bar = document.createElement("div");
+      bar.className = "sell-bar";
+      bar.setAttribute("data-key", "sell-bar");
+      const sellAll = document.createElement("button");
+      sellAll.type = "button";
+      sellAll.className = "btn";
+      sellAll.textContent =
+        "Sell all spares (" + spares.count + " items, +" + spares.gold + " gold)";
+      actionButton(sellAll, "sell-spares");
+      bar.appendChild(sellAll);
+      frag.appendChild(bar);
+    }
     let any = false;
     LOOT.forEach(function (item) {
       const count = inventoryCount(item.id);
@@ -3111,10 +3626,16 @@
         (isEquipped ? '<span class="badge equip-badge">Equipped</span>' : "") +
         '<span class="badge slot-badge">' +
         escapeHtml(item.slot) +
-        "</span></h3>" +
+        "</span>" +
+        (item.region
+          ? '<span class="badge region-badge">' + escapeHtml(getRegion(item.region).name) + "</span>"
+          : "") +
+        "</h3>" +
         '<p class="card-meta">' +
         escapeHtml(item.desc) +
-        "</p>" +
+        ' · <span class="reward-gold">sells for ' +
+        item.value +
+        " gold</span></p>" +
         "</div>";
 
       const actions = document.createElement("div");
@@ -3144,6 +3665,19 @@
         note.disabled = true;
         actions.appendChild(note);
       }
+
+      const sellBtn = document.createElement("button");
+      sellBtn.type = "button";
+      sellBtn.className = "btn";
+      sellBtn.textContent = "Sell +" + item.value;
+      sellBtn.disabled = sellableCount(item) <= 0;
+      sellBtn.title = sellBtn.disabled
+        ? item.slot === "relic"
+          ? "Your last copy keeps its blessing"
+          : "Unequip before selling your last copy"
+        : "Sell one for " + item.value + " gold";
+      actionButton(sellBtn, "sell", item.id);
+      actions.appendChild(sellBtn);
 
       card.appendChild(actions);
       frag.appendChild(card);
@@ -3189,6 +3723,52 @@
         btn.textContent = "Buy";
         btn.disabled = state.gold < u.cost;
         actionButton(btn, "upgrade", u.id);
+      }
+      card.appendChild(btn);
+      frag.appendChild(card);
+    });
+
+    const head = document.createElement("h3");
+    head.className = "subhead";
+    head.setAttribute("data-key", "training-head");
+    head.textContent = "Training (ranked — buy again and again)";
+    frag.appendChild(head);
+
+    RANKED_UPGRADES.forEach(function (def) {
+      const rank = upgradeRank(def.id);
+      const cost = rankedUpgradeCost(def);
+      const maxed = cost === null;
+      const card = document.createElement("article");
+      card.className = "card" + (maxed ? " owned" : "");
+      card.setAttribute("data-key", "train:" + def.id);
+      card.innerHTML =
+        '<div class="card-body">' +
+        "<h3>" +
+        escapeHtml(def.name) +
+        '<span class="badge">Rank ' +
+        rank +
+        " / " +
+        def.maxRank +
+        "</span></h3>" +
+        '<p class="card-meta">' +
+        escapeHtml(def.desc) +
+        "</p>" +
+        '<p class="card-meta">' +
+        (maxed
+          ? '<span class="mastery">Fully trained</span>'
+          : '<span class="reward-gold">' + cost + " gold</span> for rank " + (rank + 1)) +
+        "</p>" +
+        "</div>";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-primary";
+      if (maxed) {
+        btn.textContent = "Maxed";
+        btn.disabled = true;
+      } else {
+        btn.textContent = "Train";
+        btn.disabled = state.gold < cost;
+        actionButton(btn, "train", def.id);
       }
       card.appendChild(btn);
       frag.appendChild(card);
@@ -3308,6 +3888,7 @@
     FOES: FOES,
     HEALS: HEALS,
     UPGRADES: UPGRADES,
+    RANKED_UPGRADES: RANKED_UPGRADES,
     HOLDINGS: HOLDINGS,
     LOOT: LOOT,
     STORY_BEATS: STORY_BEATS,
@@ -3318,6 +3899,7 @@
     NAMED_KNIGHTS: NAMED_KNIGHTS,
     SAVE_VERSION: SAVE_VERSION,
     attackRating: attackRating,
+    fightWinChance: fightWinChance,
     defenseRating: defenseRating,
     bandCap: bandCap,
     hireCost: hireCost,
